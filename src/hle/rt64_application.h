@@ -6,6 +6,7 @@
 
 #include <sstream>
 #include <filesystem>
+#include <functional>
 
 #include "common/rt64_common.h"
 #include "common/rt64_emulator_configuration.h"
@@ -134,6 +135,11 @@ namespace RT64 {
         std::unique_ptr<SharedQueueResources> sharedQueueResources;
         std::unique_ptr<RenderInterface> renderInterface;
         std::atomic<bool> debuggerPaused;
+        // Host-provided ImGui overlay (recomp-ui's in-game settings menu). The
+        // inspector object is kept alive while a callback is registered because
+        // it owns the ImGui context, frame and draw submission.
+        std::function<void()> overlayCallback;
+        bool showDeveloperInspector = false;
         uint64_t frameCounter;
         uint32_t threadsAvailable;
         ProfilingTimer dlApiProfiler = ProfilingTimer(120);
@@ -168,6 +174,10 @@ namespace RT64 {
         bool sdlEventFilter(SDL_Event *event) override;
         bool usesWindowMessageFilter() override;
         void processDeveloperShortcut(DeveloperShortcut developerShortcut);
+        // Creates the inspector (ImGui context + backends) if it does not exist.
+        bool ensureInspector();
+        // Draws `callback` inside the ImGui frame every presented frame.
+        void setOverlayCallback(std::function<void()> callback);
         void updateUserConfig(bool discardFBs);
         void updateEmulatorConfig();
         void updateEnhancementConfig();

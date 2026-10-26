@@ -5,6 +5,7 @@
 #include "rt64_rsp.h"
 
 #include <cassert>
+#include <cstdlib>
 
 #include "../include/rt64_extended_gbi.h"
 #include "common/rt64_common.h"

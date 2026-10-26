@@ -106,6 +106,7 @@ namespace RT64 {
         drawCall.rectDtdy = 0;
         drawCall.rectLeftOrigin = G_EX_ORIGIN_NONE;
         drawCall.rectRightOrigin = G_EX_ORIGIN_NONE;
+        drawCall.rectAspect = G_EX_ASPECT_AUTO;
         drawCall.scissorRect.reset();
         drawCall.scissorMode = 0;
         drawCall.scissorLeftOrigin = G_EX_ORIGIN_NONE;
@@ -1603,7 +1604,7 @@ namespace RT64 {
 
         // Inspect the current workload before submission.
         lastWorkloadIndex = ext.workloadQueue->writeCursor;
-        if (ext.userConfig->developerMode) {
+        if (ext.userConfig->developerMode || ext.app->overlayCallback) {
             inspect();
         }
 
@@ -1810,7 +1811,7 @@ namespace RT64 {
     void State::updateScreen(const VI &newVI, bool fromEarlyPresent) {
         // If the debugger has paused the plugin, keep submitting the last workload and screen VI for rendering and a present event.
         if (debuggerInspector.paused && !fromEarlyPresent) {
-            if (ext.userConfig->developerMode) {
+            if (ext.userConfig->developerMode || ext.app->overlayCallback) {
                 inspect();
             }
             
@@ -2057,6 +2058,7 @@ namespace RT64 {
         // Check the debugger popup regardless of the active inspector mode.
         bool debuggerSelected = debuggerInspector.checkPopup(workload);
 
+        if (ext.app->showDeveloperInspector) {
         if (ImGui::Begin("Game editor")) {
             if (ImGui::BeginTabBar("##tabs", ImGuiTabBarFlags_None)) {
                 if (ImGui::BeginTabItem("Configuration")) {
@@ -2566,6 +2568,11 @@ namespace RT64 {
         }
 
         ImGui::End();
+        }
+
+        if (ext.app->overlayCallback) {
+            ext.app->overlayCallback();
+        }
 
         if (inspectorMode != InspectorMode::None) {
             if (ImGui::Begin("Inspector")) {

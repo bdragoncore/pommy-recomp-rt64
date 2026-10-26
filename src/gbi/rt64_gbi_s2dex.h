@@ -97,10 +97,42 @@ namespace RT64 {
             uObjTxtr txtr;
             // uObjSprite sprite;
         };
+
+        // Layout the microcode reads for G_OBJ_SPRITE / G_OBJ_RECTANGLE. Note
+        // the field order is not the one the SDK headers document; this one is
+        // what games actually store (scale before position, and the texel
+        // format in the last word).
+        struct uObjSprite {
+            uint16_t scaleW;
+            int16_t objX;
+            uint16_t paddingX;
+            uint16_t imageW;
+            uint16_t scaleH;
+            int16_t objY;
+            uint16_t paddingY;
+            uint16_t imageH;
+            uint16_t imageAdrs;
+            uint16_t imageStride;
+            uint8_t imageFlags;
+            uint8_t imagePal;
+            uint8_t imageSiz;
+            uint8_t imageFmt;
+        };
+
+        // G_OBJ_MOVEMEM (gSPObjMatrix) payload.
+        struct uObjMtx {
+            int32_t A, B, C, D;
+            int16_t Y, X;
+            uint16_t BaseScaleY, BaseScaleX;
+        };
 #pragma pack(pop)
 
         void objRenderMode(State *state, DisplayList **dl);
         void moveWord(State *state, DisplayList **dl);
+        void moveMem(State *state, DisplayList **dl);
+        void objSprite(State *state, DisplayList **dl);
+        void objRectangle(State *state, DisplayList **dl);
+        void objRectangleR(State *state, DisplayList **dl);
         void bg1Cyc(State *state, DisplayList **dl);
         void bgCopy(State *state, DisplayList **dl);
         void objLoadTxtr(State *state, DisplayList **dl);

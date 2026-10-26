@@ -254,6 +254,20 @@ namespace interop {
             }
         }
 
+        // Whether either cycle's alpha reads a texel's alpha.
+        bool alphaUsesTexture() constmethod {
+            for (uint c = 0; c < 2; c++) {
+                for (uint i = 0; i < 4; i++) {
+                    const AlphaInput alphaInput = decodeAlphaInput(i, c > 0);
+                    if ((alphaInput == A_TEXEL0) || (alphaInput == A_TEXEL1)) {
+                        return true;
+                    }
+                }
+            }
+
+            return false;
+        }
+
         uint cycleCount(OtherMode otherMode) constmethod {
             const uint cycleType = otherMode.cycleType();
             switch (cycleType) {

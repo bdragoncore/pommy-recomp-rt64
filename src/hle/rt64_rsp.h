@@ -194,6 +194,16 @@ namespace RT64 {
             std::array<uint32_t, 4> statuses;
             // Seems to hold an id corresponding to the last command run.
             int8_t data_02AE;
+            // Object matrix set by G_OBJ_MOVEMEM, identity by default. Kept as
+            // raw fields so the GBI layer does not have to include its structs.
+            int32_t objMtxA = 1 << 16;
+            int32_t objMtxB = 0;
+            int32_t objMtxC = 0;
+            int32_t objMtxD = 1 << 16;
+            int32_t objMtxX = 0;
+            int32_t objMtxY = 0;
+            int32_t objMtxBaseScaleX = 1 << 10;
+            int32_t objMtxBaseScaleY = 1 << 10;
         } S2D;
 
         struct {

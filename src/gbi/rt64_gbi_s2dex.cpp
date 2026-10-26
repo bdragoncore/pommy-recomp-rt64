@@ -4,11 +4,17 @@
 
 #include "rt64_gbi_s2dex.h"
 
+#include <algorithm>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+
 #include "../include/rt64_extended_gbi.h"
 
 #include "rt64_gbi_extended.h"
 #include "rt64_gbi_f3d.h"
 #include "rt64_gbi_f3dex.h"
+#include "rt64_gbi_f3dex2.h"
 #include "rt64_gbi_rdp.h"
 
 //#define LOG_BGRECT_METHODS
@@ -16,6 +22,10 @@
 
 namespace RT64 {
     namespace GBI_S2DEX {
+        void drawObjSprite(State *state, const uObjSprite &sprite);
+        void drawObjRectangle(State *state, const uObjSprite &sprite);
+        void drawObjRectangleR(State *state, const uObjSprite &sprite);
+
         void objRenderMode(State *state, DisplayList **dl) {
             state->rsp->setObjRenderMode((*dl)->w1);
         }
@@ -573,8 +583,9 @@ namespace RT64 {
             doLoadTxtr(state, &obj->txtr);
             
             // Execute the sprite draw
-            // TODO call doObjSprite(state, &obj->sprite) when it's implemented
-            assert(false);
+            uObjSprite sprite;
+            memcpy(&sprite, state->rsp->S2D.struct_buffer.data() + sizeof(uObjTxtr), sizeof(sprite));
+            drawObjSprite(state, sprite);
         #ifdef LOG_LOADTXTR_METHODS
             RT64_LOG_PRINTF("objLoadTxSprite::end(0x%08X)", (*dl)->w1);
         #endif
@@ -592,8 +603,9 @@ namespace RT64 {
             doLoadTxtr(state, &obj->txtr);
             
             // Execute the rect draw
-            // TODO call doObjRectangle(state, &obj->sprite) when it's implemented
-            assert(false);
+            uObjSprite sprite;
+            memcpy(&sprite, state->rsp->S2D.struct_buffer.data() + sizeof(uObjTxtr), sizeof(sprite));
+            drawObjRectangle(state, sprite);
         #ifdef LOG_LOADTXTR_METHODS
             RT64_LOG_PRINTF("objLoadTxRect::end(0x%08X)", (*dl)->w1);
         #endif
@@ -611,16 +623,339 @@ namespace RT64 {
             doLoadTxtr(state, &obj->txtr);
             
             // Execute the rect r draw
-            // TODO call doObjRectangleR(state, &obj->sprite) when it's implemented
-            assert(false);
+            uObjSprite sprite;
+            memcpy(&sprite, state->rsp->S2D.struct_buffer.data() + sizeof(uObjTxtr), sizeof(sprite));
+            drawObjRectangleR(state, sprite);
         #ifdef LOG_LOADTXTR_METHODS
             RT64_LOG_PRINTF("objLoadTxRectR::end(0x%08X)", (*dl)->w1);
         #endif
         }
 
-        void reset(State *state) {
-            state->rsp->objRenderMode = 0x0;
+        // Coordinate correctors the microcode applies before drawing a sprite.
+        // Selected by the object render mode: the shrink/widen bits pick the
+        // texture/rect insets and the bilerp bit picks the subpixel mask.
+        struct SpriteCorrector {
+            int16_t A0, A1, A2, A3, B0, B2, B3;
+        };
+
+        static SpriteCorrector spriteCorrector(uint32_t objRenderMode) {
+            // Flattened to s16 in the order the microcode indexes them.
+            static const int16_t A01[] = {
+                0x0000, 0x0000, 0x0020, 0x0010, 0x0040, 0x0020, 0x0060, 0x0030,
+                -12,    0x0000, 0x0014, 0x0010, 0x0034, 0x0020, 0x0054, 0x0030
+            };
+            static const int16_t A23[] = {
+                -2, 0x0001, -2, -2, 0x0000, 0x0001, 0x0000, 0x0000
+            };
+            static const int16_t B03[] = {
+                0x0000, -4, 0x0001, 0x0000, 0x0003, -1, 0x0000, -16
+            };
+
+            const uint32_t o1 = (objRenderMode & (S2DEX_G_OBJRM_SHRINKSIZE_1 | S2DEX_G_OBJRM_SHRINKSIZE_2 | S2DEX_G_OBJRM_WIDEN)) >> 3;
+            const uint32_t o2 = (objRenderMode & (S2DEX_G_OBJRM_SHRINKSIZE_1 | S2DEX_G_OBJRM_BILERP)) >> 2;
+            const uint32_t o3 = (objRenderMode & S2DEX_G_OBJRM_BILERP) >> 1;
+
+            SpriteCorrector cc;
+            cc.A0 = A01[(0 + o1) ^ 1];
+            cc.A1 = A01[(1 + o1) ^ 1];
+            cc.A2 = A23[(0 + o2) ^ 1];
+            cc.A3 = A23[(1 + o2) ^ 1];
+            cc.B0 = B03[(0 + o3) ^ 1];
+            cc.B2 = B03[(2 + o3) ^ 1];
+            cc.B3 = B03[(3 + o3) ^ 1];
+            return cc;
         }
+
+        static void readObjSprite(State *state, uint32_t ptr, uObjSprite &sprite) {
+            uint32_t rdramAddress = state->rsp->fromSegmentedMasked(ptr) & RSP_DMA_MASK;
+            memcpy(&sprite, state->fromRDRAM(rdramAddress), sizeof(sprite));
+        }
+
+        // The sprite's texture is already in TMEM (loaded by the preceding
+        // G_OBJ_LOADTXTR); this sets up the render tile the way the ucode does.
+        static void setSpriteTile(State *state, const uObjSprite &sprite) {
+            const uint32_t w = std::max<uint32_t>(sprite.imageW >> 5, 1);
+            const uint32_t h = std::max<uint32_t>(sprite.imageH >> 5, 1);
+            state->rdp->setTile(G_TX_RENDERTILE, sprite.imageFmt, sprite.imageSiz, sprite.imageStride,
+                sprite.imageAdrs, sprite.imagePal, G_TX_CLAMP | G_TX_NOMIRROR, G_TX_CLAMP | G_TX_NOMIRROR,
+                G_TX_NOMASK, G_TX_NOMASK, G_TX_NOLOD, G_TX_NOLOD);
+            state->rdp->setTileSize(G_TX_RENDERTILE, 0, 0, (w - 1) << 2, (h - 1) << 2);
+        }
+
+        // One textured rectangle: screen coords in the RDP's 1/4 pixel units,
+        // texture coords in 1/32 texel units.
+        static void drawSpriteRectStep(State *state, int32_t x0, int32_t y0, int32_t x1, int32_t y1,
+            int32_t s0, int32_t t0, int32_t dsdx, int32_t dtdy)
+        {
+            if (x1 == x0 || y1 == y0) {
+                return;
+            }
+
+            state->rdp->drawTexRect(x0, y0, x1, y1, G_TX_RENDERTILE, static_cast<int16_t>(s0), static_cast<int16_t>(t0),
+                static_cast<int16_t>(dsdx), static_cast<int16_t>(dtdy), false);
+            state->endSpriteCommand();
+        }
+
+        static void drawSpriteRect(State *state, int32_t x0, int32_t y0, int32_t x1, int32_t y1,
+            int32_t s0, int32_t t0, int32_t s1, int32_t t1)
+        {
+            if (x1 == x0 || y1 == y0) {
+                return;
+            }
+
+            const int32_t dsdx = ((s1 - s0) << 7) / (x1 - x0);
+            const int32_t dtdy = ((t1 - t0) << 7) / (y1 - y0);
+            drawSpriteRectStep(state, x0, y0, x1, y1, s0, t0, dsdx, dtdy);
+        }
+
+        // A rotated or sheared sprite: the microcode emits the matrix-mapped
+        // quad as two RDP triangles, texture stretched corner to corner like
+        // the axis-aligned case below. Corners are in 1/4 pixels, in the order
+        // upper-left, upper-right, lower-left, lower-right of the image.
+        static void drawRotatedSprite(State *state, const uObjSprite &sprite, const int32_t px[4], const int32_t py[4]) {
+            float s0 = 0.0f;
+            float t0 = 0.0f;
+            float s1 = std::max<int32_t>(sprite.imageW - 32, 0) / 32.0f;
+            float t1 = std::max<int32_t>(sprite.imageH - 32, 0) / 32.0f;
+            if (sprite.imageFlags & S2DEX_G_BG_FLAG_FLIPS) {
+                std::swap(s0, s1);
+            }
+            if (sprite.imageFlags & S2DEX_G_BG_FLAG_FLIPT) {
+                std::swap(t0, t1);
+            }
+
+            const float cs[4] = { s0, s1, s0, s1 };
+            const float ct[4] = { t0, t0, t1, t1 };
+            const int order[6] = { 0, 1, 2, 1, 3, 2 };
+            float pos[6 * 4];
+            float tc[6 * 2];
+            float col[6 * 4] = {};
+            for (int i = 0; i < 6; i++) {
+                const int v = order[i];
+                pos[i * 4 + 0] = px[v] / 4.0f;
+                pos[i * 4 + 1] = py[v] / 4.0f;
+                pos[i * 4 + 2] = 0.0f;
+                pos[i * 4 + 3] = 1.0f;
+                // The raw triangle path takes texture coordinates in half
+                // texels, the scale RT64's own RDP triangle decoder produces
+                // (S/T in s10.5 times 1024 / 16384).
+                tc[i * 2 + 0] = cs[v] * 2.0f;
+                tc[i * 2 + 1] = ct[v] * 2.0f;
+            }
+
+            state->rdp->drawTris(2, pos, tc, col, G_TX_RENDERTILE, 0);
+            state->endSpriteCommand();
+        }
+
+        void drawObjSprite(State *state, const uObjSprite &sprite) {
+            setSpriteTile(state, sprite);
+
+            const SpriteCorrector cc = spriteCorrector(state->rsp->objRenderMode);
+            const int32_t scaleW = std::max<int32_t>(sprite.scaleW, 1);
+            const int32_t scaleH = std::max<int32_t>(sprite.scaleH, 1);
+
+            const int32_t x0 = (state->rsp->S2D.objMtxX + cc.B3) & cc.B0;
+            const int32_t y0 = (state->rsp->S2D.objMtxY + cc.B3) & cc.B0;
+            const int32_t ulx = sprite.objX + cc.A3;
+            const int32_t uly = sprite.objY + cc.A3;
+            const int32_t lrx = static_cast<int32_t>((((static_cast<uint64_t>(sprite.imageW) - cc.A1) << 8) * (0x80007FFFu / scaleW)) >> 32) + ulx;
+            const int32_t lry = static_cast<int32_t>((((static_cast<uint64_t>(sprite.imageH) - cc.A1) << 8) * (0x80007FFFu / scaleH)) >> 32) + uly;
+
+            const int32_t A = state->rsp->S2D.objMtxA;
+            const int32_t B = state->rsp->S2D.objMtxB;
+            const int32_t C = state->rsp->S2D.objMtxC;
+            const int32_t D = state->rsp->S2D.objMtxD;
+
+            // Corners run through the object matrix. Translation and scale keep
+            // the quad axis aligned, which the RDP texrect path handles; a
+            // rotated one goes out as triangles.
+            const int32_t px[4] = {
+                x0 + static_cast<int32_t>(((static_cast<int64_t>(ulx) * A + static_cast<int64_t>(uly) * B)) >> 16),
+                x0 + static_cast<int32_t>(((static_cast<int64_t>(lrx) * A + static_cast<int64_t>(uly) * B)) >> 16),
+                x0 + static_cast<int32_t>(((static_cast<int64_t>(ulx) * A + static_cast<int64_t>(lry) * B)) >> 16),
+                x0 + static_cast<int32_t>(((static_cast<int64_t>(lrx) * A + static_cast<int64_t>(lry) * B)) >> 16)
+            };
+            const int32_t py[4] = {
+                y0 + static_cast<int32_t>(((static_cast<int64_t>(ulx) * C + static_cast<int64_t>(uly) * D)) >> 16),
+                y0 + static_cast<int32_t>(((static_cast<int64_t>(lrx) * C + static_cast<int64_t>(uly) * D)) >> 16),
+                y0 + static_cast<int32_t>(((static_cast<int64_t>(ulx) * C + static_cast<int64_t>(lry) * D)) >> 16),
+                y0 + static_cast<int32_t>(((static_cast<int64_t>(lrx) * C + static_cast<int64_t>(lry) * D)) >> 16)
+            };
+
+            if ((B != 0) || (C != 0)) {
+                drawRotatedSprite(state, sprite, px, py);
+                return;
+            }
+
+            int32_t left = px[0], right = px[0], top = py[0], bottom = py[0];
+            for (int i = 1; i < 4; i++) {
+                left = std::min(left, px[i]);
+                right = std::max(right, px[i]);
+                top = std::min(top, py[i]);
+                bottom = std::max(bottom, py[i]);
+            }
+
+            // Map the texture the way the S2DEX2 microcode does (read from its
+            // RDP output in the gopher64-re replay, docs/rendering.md): texel 0
+            // at the quad's first edge and the image's last texel minus one at
+            // the far edge, i.e. imageW - 1 texels stretched over the quad. With
+            // SHRINKSIZE the last texel is the overlap shared with the next
+            // strip; mapping through it (imageW texels) drew a stray row at
+            // every strip edge, and stepping at the nominal scale instead let
+            // zoomed sprites drift by up to a texel from the hardware image.
+            // The step is in s5.10 texels per pixel, the extent in 1/4 pixels.
+            const int32_t width = std::max<int32_t>(right - left, 1);
+            const int32_t height = std::max<int32_t>(bottom - top, 1);
+            int32_t dsdx = (std::max<int32_t>(sprite.imageW - 32, 0) << 7) / width;
+            int32_t dtdy = (std::max<int32_t>(sprite.imageH - 32, 0) << 7) / height;
+            int32_t s0 = 0;
+            int32_t t0 = 0;
+            if (sprite.imageFlags & S2DEX_G_BG_FLAG_FLIPS) {
+                s0 = sprite.imageW - 32;
+                dsdx = -dsdx;
+            }
+            if (sprite.imageFlags & S2DEX_G_BG_FLAG_FLIPT) {
+                t0 = sprite.imageH - 32;
+                dtdy = -dtdy;
+            }
+
+            // The microcode draws the quad as antialiased RDP triangles, so a
+            // row or column the quad only partly covers gets that coverage
+            // times the texel alpha (the sprite render modes use
+            // CVG_X_ALPHA | ALPHA_CVG_SEL), and is dropped when that falls
+            // below one sample. A texrect covers whole pixels, so round each
+            // edge to the nearest pixel: a row under half covered is left out
+            // instead of drawn at full coverage. Zooming words on the title
+            // screen otherwise flashed a line of the transparent palette
+            // color (blue) along their bottom edge at the frames where it
+            // sat a quarter pixel past a row. Every edge rounds the same way
+            // so abutting strips still meet without a gap, and the texture
+            // advances to stay evaluated at the new first row and column.
+            const int32_t snappedLeft = (left + 2) & ~3;
+            const int32_t snappedTop = (top + 2) & ~3;
+            s0 += (dsdx * (snappedLeft - left)) >> 7;
+            t0 += (dtdy * (snappedTop - top)) >> 7;
+            left = snappedLeft;
+            top = snappedTop;
+            right = (right + 2) & ~3;
+            bottom = (bottom + 2) & ~3;
+
+            // The tile stays the full image (setSpriteTile), as in the
+            // microcode: with bilerp the hardware does blend toward the next
+            // texel row, including on a sprite's one-pixel last strip.
+            const int32_t s1 = s0 + ((dsdx * (right - left)) >> 7);
+            const int32_t t1 = t0 + ((dtdy * (bottom - top)) >> 7);
+
+            drawSpriteRectStep(state, left, top, right, bottom, s0, t0, dsdx, dtdy);
+        }
+
+        void drawObjRectangle(State *state, const uObjSprite &sprite) {
+            setSpriteTile(state, sprite);
+
+            const SpriteCorrector cc = spriteCorrector(state->rsp->objRenderMode);
+            const int32_t scaleW = std::max<int32_t>(sprite.scaleW, 1);
+            const int32_t scaleH = std::max<int32_t>(sprite.scaleH, 1);
+
+            const int32_t xh = (sprite.objX + cc.A2) & cc.B0;
+            const int32_t yh = (sprite.objY + cc.A2) & cc.B0;
+            const int32_t xl = static_cast<int32_t>((((static_cast<uint64_t>(sprite.imageW) - cc.A1) << 24) * (0x80007FFFu / scaleW)) >> 48) + xh;
+            const int32_t yl = static_cast<int32_t>((((static_cast<uint64_t>(sprite.imageH) - cc.A1) << 24) * (0x80007FFFu / scaleH)) >> 48) + yh;
+
+            const int32_t sh = cc.A0 + cc.B2;
+            const int32_t sl = sh + sprite.imageW + cc.A0 - cc.A1 - 1;
+            const int32_t th = sh - (((yh & 3) * 0x200 * scaleH) >> 16);
+            const int32_t tl = th + sprite.imageH + cc.A0 - cc.A1 - 1;
+
+            drawSpriteRect(state, xh, yh, xl, yl, sh, th, sl, tl);
+        }
+
+        void objSprite(State *state, DisplayList **dl) {
+            uObjSprite sprite;
+            readObjSprite(state, (*dl)->w1, sprite);
+            drawObjSprite(state, sprite);
+        }
+
+        // G_OBJ_RECTANGLE_R carries the object's base scale in addition to the
+        // sprite's, so the rect is sized with the folded scale and offset by the
+        // matrix origin. Everything else matches the plain rectangle.
+        void drawObjRectangleR(State *state, const uObjSprite &sprite) {
+            setSpriteTile(state, sprite);
+
+            const SpriteCorrector cc = spriteCorrector(state->rsp->objRenderMode);
+            const int32_t baseScaleX = std::max<int32_t>(state->rsp->S2D.objMtxBaseScaleX, 1);
+            const int32_t baseScaleY = std::max<int32_t>(state->rsp->S2D.objMtxBaseScaleY, 1);
+            const int32_t spriteScaleW = std::max<int32_t>(sprite.scaleW, 1);
+            const int32_t spriteScaleH = std::max<int32_t>(sprite.scaleH, 1);
+            const int32_t scaleW = std::max<int32_t>(static_cast<int32_t>((static_cast<int64_t>(baseScaleX) * 0x40 * spriteScaleW) >> 16), 1);
+            const int32_t scaleH = std::max<int32_t>(static_cast<int32_t>((static_cast<int64_t>(baseScaleY) * 0x40 * spriteScaleH) >> 16), 1);
+
+            const int32_t xhp = static_cast<int32_t>(((static_cast<int64_t>(sprite.objX) << 16) * 0x800 * (0x80007FFFu / baseScaleX)) >> 32)
+                + (((state->rsp->S2D.objMtxX + cc.A2) & cc.B0) << 16);
+            const int32_t xh = xhp >> 16;
+            const int32_t xlp = xhp + static_cast<int32_t>(((static_cast<uint64_t>(sprite.imageW) - static_cast<uint64_t>(static_cast<int64_t>(cc.A1))) << 24) * (0x80007FFFu / scaleW) >> 32);
+            const int32_t xl = xlp >> 16;
+
+            const int32_t yhp = static_cast<int32_t>(((static_cast<int64_t>(sprite.objY) << 16) * 0x800 * (0x80007FFFu / baseScaleY)) >> 32)
+                + (((state->rsp->S2D.objMtxY + cc.A2) & cc.B0) << 16);
+            const int32_t yh = yhp >> 16;
+            const int32_t ylp = yhp + static_cast<int32_t>(((static_cast<uint64_t>(sprite.imageH) - static_cast<uint64_t>(static_cast<int64_t>(cc.A1))) << 24) * (0x80007FFFu / scaleH) >> 32);
+            const int32_t yl = ylp >> 16;
+
+            const int32_t sh = cc.A0 + cc.B2;
+            const int32_t sl = sh + sprite.imageW + cc.A0 - cc.A1 - 1;
+            const int32_t th = sh - (((yh & 3) * 0x200 * scaleH) >> 16);
+            const int32_t tl = th + sprite.imageH + cc.A0 - cc.A1 - 1;
+
+            int32_t s0 = sh;
+            int32_t t0 = th;
+            int32_t s1 = sl;
+            int32_t t1 = tl;
+            if (sprite.imageFlags & S2DEX_G_BG_FLAG_FLIPS) {
+                std::swap(s0, s1);
+            }
+            if (sprite.imageFlags & S2DEX_G_BG_FLAG_FLIPT) {
+                std::swap(t0, t1);
+            }
+
+            drawSpriteRect(state, xh, yh, xl, yl, s0, t0, s1, t1);
+        }
+
+        void objRectangle(State *state, DisplayList **dl) {
+            uObjSprite sprite;
+            readObjSprite(state, (*dl)->w1, sprite);
+            drawObjRectangle(state, sprite);
+        }
+
+        void objRectangleR(State *state, DisplayList **dl) {
+            uObjSprite sprite;
+            readObjSprite(state, (*dl)->w1, sprite);
+            drawObjRectangleR(state, sprite);
+        }
+
+        void moveMem(State *state, DisplayList **dl) {
+            // gSPObjMatrix/gSPObjSubMatrix reuse G_MOVEMEM with their own
+            // indices; everything else is a normal F3DEX2 move.
+            const uint32_t index = (*dl)->p0(16, 8);
+            if (index == 0x17) {
+                uObjMtx mtx;
+                uint32_t rdramAddress = state->rsp->fromSegmentedMasked((*dl)->w1) & RSP_DMA_MASK;
+                memcpy(&mtx, state->fromRDRAM(rdramAddress), sizeof(mtx));
+                state->rsp->S2D.objMtxA = mtx.A;
+                state->rsp->S2D.objMtxB = mtx.B;
+                state->rsp->S2D.objMtxC = mtx.C;
+                state->rsp->S2D.objMtxD = mtx.D;
+                state->rsp->S2D.objMtxX = mtx.X;
+                state->rsp->S2D.objMtxY = mtx.Y;
+                state->rsp->S2D.objMtxBaseScaleX = mtx.BaseScaleX;
+                state->rsp->S2D.objMtxBaseScaleY = mtx.BaseScaleY;
+                return;
+            }
+
+            GBI_F3DEX2::moveMem(state, dl);
+        }
+
+        void reset(State *state) {
+            state->rsp->objRenderMode = 0x0;        }
 
         void setup(GBI *gbi) {
             gbi->constants = {

@@ -1488,7 +1488,14 @@ namespace RT64 {
                 // The call's scissor spans the whole width of the framebuffer pair scissor. Custom origin must not be in use to be able to use the stretched viewport.
                 const auto &viewport = drawData.rspViewports[proj.transformsIndex];
                 FixedRect intersectionRect = proj.scissorRect.intersection(viewport.rect(viewportClipRatios));
-                bool coversWholeWidth = !intersectionRect.isEmpty() && (intersectionRect.ulx <= fbPair.scissorRect.ulx) && (intersectionRect.lrx >= fbPair.scissorRect.lrx);
+                // Hudson's engine draws the 3D view with a small overscan
+                // margin, so its scissor never reaches the framebuffer edges.
+                // Treat a near-full-width scissor as full width, otherwise the
+                // viewport can never be stretched to the window's aspect ratio.
+                const int32_t widthTolerance = fbPair.scissorRect.width(true, true) / 20;
+                bool coversWholeWidth = !intersectionRect.isEmpty()
+                    && (intersectionRect.left(true) <= fbPair.scissorRect.left(true) + widthTolerance)
+                    && (intersectionRect.right(false) >= fbPair.scissorRect.right(false) - widthTolerance);
                 bool horizontalRatio = !intersectionRect.isEmpty() && (intersectionRect.width(true, true) > intersectionRect.height(true, true));
                 bool useWideViewport = (viewportOrigin == G_EX_ORIGIN_NONE) && coversWholeWidth && horizontalRatio;
                 if (useWideViewport) {
@@ -1645,7 +1652,7 @@ namespace RT64 {
                             // The call's scissor spans the whole width of the framebuffer pair scissor. The rect must not be using extended origins.
                             const bool regularOrigins = (call.callDesc.rectLeftOrigin == G_EX_ORIGIN_NONE) && (call.callDesc.rectRightOrigin == G_EX_ORIGIN_NONE);
                             const bool coversScissorWidth = regularOrigins && (call.callDesc.rect.ulx <= fbPair.scissorRect.ulx) && (call.callDesc.rect.lrx >= fbPair.scissorRect.lrx);
-                            if (tileCopiesUsed || coversScissorWidth) {
+                            if ((tileCopiesUsed || coversScissorWidth || call.callDesc.rectAspect == G_EX_ASPECT_STRETCH) && (call.callDesc.rectAspect != G_EX_ASPECT_ADJUST)) {
                                 invRatioScale = 1.0f;
                             }
                             else {

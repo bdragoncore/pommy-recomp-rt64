@@ -65,6 +65,10 @@ namespace RT64 {
 
             gbi->map[F3DEX2_G_SPNOOP] = &GBI_EXTENDED::noOpHook;
             gbi->map[S2DEX2_G_OBJ_RENDERMODE] = &GBI_S2DEX::objRenderMode;
+            gbi->map[S2DEX2_G_OBJ_RECTANGLE] = &GBI_S2DEX::objRectangle;
+            gbi->map[S2DEX2_G_OBJ_SPRITE] = &GBI_S2DEX::objSprite;
+            gbi->map[S2DEX2_G_OBJ_RECTANGLE_R] = &GBI_S2DEX::objRectangleR;
+            gbi->map[F3DEX2_G_MOVEMEM] = &GBI_S2DEX::moveMem;
             gbi->map[S2DEX2_G_BG_1CYC] = &GBI_S2DEX::bg1Cyc;
             gbi->map[S2DEX2_G_BG_COPY] = &GBI_S2DEX::bgCopy;
             gbi->map[S2DEX2_G_OBJ_LOADTXTR] = &GBI_S2DEX::objLoadTxtr;

@@ -112,6 +112,16 @@ LIBRARY_EXPORT bool RasterPS(const RenderParams rp, float4 vertexPosition, float
         lowResUV -= fmod(screenPos.xy, FbParams.resolutionScale.yy) * float2(ddxuvx, ddyuvy);
     }
     
+    // When alpha is the pixel's coverage, the color of texels with little or no alpha is never meant to
+    // be seen: the hardware does filter it in, but those pixels get partial coverage and the VI filter
+    // blends them into the background. There is no VI filter here, so the unweighted color shows as a
+    // fringe instead (a blue line around sprites whose transparent palette entry is blue), at native
+    // resolution too. Filter with premultiplied alpha, which draws what the VI output shows rather
+    // than what the RDP writes. Native-sampled 2D is left untouched, and so is a combiner whose alpha
+    // doesn't come from the texture: its texels' alpha is never seen, and can be zero throughout.
+    const bool premultiplyAlpha = otherMode.cvgXAlpha() && otherMode.alphaCvgSel() &&
+        renderFlagUpscale2D(rp.flags) && colorCombiner.alphaUsesTexture();
+
     int tileIndex0 = 0;
     int tileIndex1 = 1;
     float lodFraction;
@@ -135,7 +145,7 @@ LIBRARY_EXPORT bool RasterPS(const RenderParams rp, float4 vertexPosition, float
         
         const GPUTile gpuTile = GPUTiles[globalTileIndex];
         const float2 textureUV = gpuTileFlagHighRes(gpuTile.flags) ? vertexUV : lowResUV;
-        texVal0 = sampleTexture(otherMode, rp.flags, textureUV, ddx(vertexUV), ddy(vertexUV), rdpTile, gpuTile, false);
+        texVal0 = sampleTexture(otherMode, rp.flags, textureUV, ddx(vertexUV), ddy(vertexUV), rdpTile, gpuTile, false, premultiplyAlpha);
     }
     
     if (renderFlagUsesTexture1(rp.flags)) {
@@ -151,7 +161,7 @@ LIBRARY_EXPORT bool RasterPS(const RenderParams rp, float4 vertexPosition, float
         const GPUTile gpuTile = GPUTiles[globalTileIndex];
         const float2 textureUV = gpuTileFlagHighRes(gpuTile.flags) ? vertexUV : lowResUV;
         const uint nativeSampler = renderFlagNativeSampler1(rp.flags);
-        texVal1 = sampleTexture(otherMode, rp.flags, textureUV, ddx(vertexUV), ddy(vertexUV), rdpTile, gpuTile, oneCycleHardwareBug);
+        texVal1 = sampleTexture(otherMode, rp.flags, textureUV, ddx(vertexUV), ddy(vertexUV), rdpTile, gpuTile, oneCycleHardwareBug, premultiplyAlpha);
     }
     
     // Color combiner.

@@ -73,6 +73,7 @@ namespace RT64 {
         frameCounter = 0;
         threadsAvailable = std::max(std::thread::hardware_concurrency(), 1U);
         freeCamClearQueued = false;
+        showDeveloperInspector = false;
 
         if (appConfig.detectDataPath) {
             this->appConfig.dataPath = userPaths.detectDataPath(appConfig.appId);
@@ -622,20 +623,38 @@ namespace RT64 {
         return userConfig.developerMode;
     }
 
+    bool Application::ensureInspector() {
+        const std::lock_guard lock(presentQueue->inspectorMutex);
+        if (presentQueue->inspector != nullptr) {
+            return true;
+        }
+
+        presentQueue->inspector = std::make_unique<Inspector>(device.get(), swapChain.get(), chosenGraphicsAPI, appWindow->sdlWindow);
+        if (!userPaths.isEmpty()) {
+            presentQueue->inspector->setIniPath(userPaths.imguiPath);
+        }
+
+        freeCamClearQueued = true;
+        return presentQueue->inspector != nullptr;
+    }
+
+    void Application::setOverlayCallback(std::function<void()> callback) {
+        overlayCallback = std::move(callback);
+        if (overlayCallback) {
+            ensureInspector();
+        }
+    }
+
     void Application::processDeveloperShortcut(DeveloperShortcut developerShortcut) {
         switch (developerShortcut) {
         case DeveloperShortcut::Inspector: {
             if (userConfig.developerMode) {
-                const std::lock_guard lock(presentQueue->inspectorMutex);
-                if (presentQueue->inspector == nullptr) {
-                    presentQueue->inspector = std::make_unique<Inspector>(device.get(), swapChain.get(), chosenGraphicsAPI, appWindow->sdlWindow);
-                    if (!userPaths.isEmpty()) {
-                        presentQueue->inspector->setIniPath(userPaths.imguiPath);
-                    }
-
-                    freeCamClearQueued = true;
+                showDeveloperInspector = !showDeveloperInspector;
+                if (showDeveloperInspector) {
+                    ensureInspector();
                 }
-                else if (presentQueue->inspector != nullptr) {
+                else if (!overlayCallback) {
+                    const std::lock_guard lock(presentQueue->inspectorMutex);
                     presentQueue->inspector.reset(nullptr);
                 }
             }
